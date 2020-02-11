@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Continuous deployment for infrastructue"""
+"""Github attached AWS Code Pipeline"""
 
 __author__ = 'Pedro Larroy'
 __version__ = '0.1'
@@ -31,7 +31,7 @@ def create_codebuild_project(template) -> cb.Project:
 
     environment = Environment(
         ComputeType='BUILD_GENERAL1_SMALL',
-        Image='aws/codebuild/python:3.7.1',
+        Image='aws/codebuild/standard:3.0',
         Type='LINUX_CONTAINER',
     )
 
@@ -57,9 +57,9 @@ def create_codebuild_project(template) -> cb.Project:
 
     # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-codebuild-project-source.html
     return Project(
-        "InfraContinuousCodeBuild",
-        Name = "InfraContinuousCodeBuild",
-        Description = 'continuous deployment of infrastructure',
+        "ContinuousCodeBuild",
+        Name = "ContinuousCodeBuild",
+        Description = 'Continous pipeline',
         Artifacts = Artifacts(Type='CODEPIPELINE'),
         Environment = environment,
         Source = Source(Type='CODEPIPELINE'),
@@ -133,7 +133,7 @@ def create_pipeline_template(config) -> Template:
     codebuild_project = t.add_resource(create_codebuild_project(t))
 
     pipeline = t.add_resource(Pipeline(
-        "InfraContinuousPipeline",
+        "CDPipeline",
         ArtifactStore = ArtifactStore(
             Type = "S3",
             Location = Ref(artifact_store_s3_bucket)
@@ -262,7 +262,7 @@ def script_name() -> str:
 
 
 def config_argparse() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Infra pipeline",
+    parser = argparse.ArgumentParser(description="Code pipeline",
         epilog="""
 """)
     parser.add_argument('config', nargs='?', help='config file', default='config.yaml')
