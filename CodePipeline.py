@@ -11,7 +11,7 @@ import os
 import sys
 import subprocess
 import logging
-from troposphere import Parameter, Ref, Template, iam
+from troposphere import Parameter, Ref, Template, iam, Output
 from troposphere.iam import Role
 from troposphere.s3 import Bucket
 from troposphere.codepipeline import (
@@ -26,45 +26,8 @@ from awacs.sts import AssumeRole
 from util import *
 
 
-def create_codebuild_project(template) -> cb.Project:
-    from troposphere.codebuild import Project, Environment, Artifacts, Source
+from troposphere.codebuild import Project, Environment, Artifacts, Source
 
-    environment = Environment(
-        ComputeType='BUILD_GENERAL1_SMALL',
-        Image='aws/codebuild/standard:3.0',
-        Type='LINUX_CONTAINER',
-    )
-
-    codebuild_role = template.add_resource(
-        Role(
-            "CodeBuildRole",
-            AssumeRolePolicyDocument=Policy(
-                Statement=[
-                    Statement(
-                        Effect=Allow,
-                        Action=[AssumeRole],
-                        Principal=Principal("Service", ["codebuild.amazonaws.com"])
-                    )
-                ]
-            ),
-            ManagedPolicyArns=[
-                'arn:aws:iam::aws:policy/AmazonS3FullAccess',
-                'arn:aws:iam::aws:policy/CloudWatchFullAccess',
-                'arn:aws:iam::aws:policy/AWSCodeBuildAdminAccess',
-            ],
-        )
-    )
-
-    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-codebuild-project-source.html
-    return Project(
-        "ContinuousCodeBuild",
-        Name = "ContinuousCodeBuild",
-        Description = 'Continous pipeline',
-        Artifacts = Artifacts(Type='CODEPIPELINE'),
-        Environment = environment,
-        Source = Source(Type='CODEPIPELINE'),
-        ServiceRole = Ref(codebuild_role)
-    )
 
 
 def create_pipeline_template(config) -> Template:
@@ -130,7 +93,60 @@ def create_pipeline_template(config) -> Template:
     ))
 
 
-    codebuild_project = t.add_resource(create_codebuild_project(t))
+    linux_environment = Environment(
+        ComputeType='BUILD_GENERAL1_LARGE',
+        Image='aws/codebuild/standard:3.0',
+        Type='LINUX_CONTAINER',
+    )
+
+    codebuild_role = t.add_resource(
+        Role(
+            "CodeBuildRole",
+            AssumeRolePolicyDocument=Policy(
+                Statement=[
+                    Statement(
+                        Effect=Allow,
+                        Action=[AssumeRole],
+                        Principal=Principal("Service", ["codebuild.amazonaws.com"])
+                    )
+                ]
+            ),
+            ManagedPolicyArns=[
+                'arn:aws:iam::aws:policy/AmazonS3FullAccess',
+                'arn:aws:iam::aws:policy/CloudWatchFullAccess',
+                'arn:aws:iam::aws:policy/AWSCodeBuildAdminAccess',
+            ],
+        )
+    )
+
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-codebuild-project-source.html
+    linux_cb_project = t.add_resource(Project(
+        "ContinuousCodeBuildLinux",
+        Name = "ContinuousCodeBuildLinux",
+        Description = 'Continous pipeline',
+        Artifacts = Artifacts(Type='CODEPIPELINE'),
+        Environment = linux_environment,
+        Source = Source(Type='CODEPIPELINE', BuildSpec="ci_cd/buildspec_linux.yml"),
+        ServiceRole = Ref(codebuild_role)
+    ))
+
+    windows_environment = Environment(
+        ComputeType='BUILD_GENERAL1_LARGE',
+        Image='aws/codebuild/windows-base:1.0',
+        Type='WINDOWS_CONTAINER',
+    )
+
+
+    windows_cb_project = t.add_resource(Project(
+        "ContinuousCodeBuildWin",
+        Name = "ContinuousCodeBuildWin",
+        Description = 'Continous pipeline',
+        Artifacts = Artifacts(Type='CODEPIPELINE'),
+        Environment = windows_environment,
+        Source = Source(Type='CODEPIPELINE', BuildSpec="ci_cd/buildspec_windows.yml"),
+        ServiceRole = Ref(codebuild_role)
+    ))
+
 
     pipeline = t.add_resource(Pipeline(
         "CDPipeline",
@@ -179,7 +195,7 @@ def create_pipeline_template(config) -> Template:
                 Name = "Build",
                 Actions = [
                     Actions(
-                        Name = "BuildAction",
+                        Name = "LinuxBuild",
                         ActionTypeId = ActionTypeId(
                             Category = "Build",
                             Owner = "AWS",
@@ -193,14 +209,38 @@ def create_pipeline_template(config) -> Template:
                         ],
                         OutputArtifacts = [
                             OutputArtifacts(
-                                Name = "BuildArtifacts"
+                                Name = "LinuxBuild"
                             )
                         ],
                         Configuration = {
-                            'ProjectName': Ref(codebuild_project),
+                            'ProjectName': Ref(linux_cb_project),
+                        },
+                        RunOrder = "1"
+                    ),
+                    Actions(
+                        Name = "WindowsBuild",
+                        ActionTypeId = ActionTypeId(
+                            Category = "Build",
+                            Owner = "AWS",
+                            Provider = "CodeBuild",
+                            Version = "1"
+                        ),
+                        InputArtifacts = [
+                            InputArtifacts(
+                                Name = "GitHubSourceCode"
+                            )
+                        ],
+                        OutputArtifacts = [
+                            OutputArtifacts(
+                                Name = "WindowsBuild"
+                            )
+                        ],
+                        Configuration = {
+                            'ProjectName': Ref(windows_cb_project),
                         },
                         RunOrder = "1"
                     )
+
                 ]
             ),
 
@@ -222,6 +262,12 @@ def create_pipeline_template(config) -> Template:
         TargetPipeline = Ref(pipeline),
         TargetAction = 'Source',
         TargetPipelineVersion = pipeline.GetAtt('Version')
+    ))
+
+    t.add_output(Output(
+        "ArtifactBucket",
+        Description="Bucket for build artifacts",
+        Value=Ref(artifact_store_s3_bucket)
     ))
 
     return t
