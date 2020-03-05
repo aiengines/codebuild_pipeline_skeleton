@@ -5,37 +5,95 @@
 __author__ = 'Pedro Larroy'
 __version__ = '0.1'
 
-
-import boto3
-import os
-import sys
-import subprocess
-import logging
-from troposphere import Parameter, Ref, Template, iam
-from troposphere.iam import Role
-from troposphere.s3 import Bucket
-from troposphere.codepipeline import (
-    Pipeline, Stages, Actions, ActionTypeId, OutputArtifacts, InputArtifacts, Webhook,
-    WebhookAuthConfiguration, WebhookFilterRule,
-    ArtifactStore, DisableInboundStageTransitions)
-import troposphere.codebuild as cb
 import argparse
+
 from awacs.aws import Allow, Statement, Principal, PolicyDocument, Policy
 from awacs.sts import AssumeRole
+from troposphere import Parameter, Ref, Join
+from troposphere.codebuild import Project, Environment, Artifacts, Source, WebhookFilter, ProjectTriggers, \
+    SourceCredential
+from troposphere.iam import Role
+from troposphere.secretsmanager import Secret
 
 from util import *
 
 
-def create_codebuild_project(template) -> cb.Project:
-    from troposphere.codebuild import Project, Environment, Artifacts, Source
+def create_pipeline_template(config) -> Template:
+    t = Template()
 
-    environment = Environment(
-        ComputeType='BUILD_GENERAL1_SMALL',
+    github_token = t.add_parameter(Parameter(
+        "GithubToken",
+        Type="String"
+    ))
+
+    github_owner = t.add_parameter(Parameter(
+        "GitHubOwner",
+        Type='String',
+        Default='aiengines',
+        AllowedPattern="[A-Za-z0-9-_]+"
+    ))
+
+    github_repo = t.add_parameter(Parameter(
+        "GitHubRepo",
+        Type='String',
+        Default='codebuild_pipeline_skeleton',
+        AllowedPattern="[A-Za-z0-9-_]+"
+    ))
+
+    github_branch = t.add_parameter(Parameter(
+        "GitHubBranch",
+        Type='String',
+        Default='master',
+        AllowedPattern="[A-Za-z0-9-_]+"
+    ))
+
+    # artifact_store_s3_bucket = t.add_resource(Bucket(
+    #    "S3Bucket",
+    # ))
+
+    gh_token_secret = t.add_resource(Secret(
+        "GHToken",
+        Name="GHToken",
+        Description="GithubToken for codebuild projects",
+        SecretString=Ref(github_token)
+    ))
+
+    cloudformationrole = t.add_resource(Role(
+        "CloudformationRole",
+        AssumeRolePolicyDocument=PolicyDocument(
+            Version="2012-10-17",
+            Statement=[
+                Statement(
+                    Effect=Allow,
+                    Action=[AssumeRole],
+                    Principal=Principal("Service", ["cloudformation.amazonaws.com"])
+                )
+            ]
+        ),
+        ManagedPolicyArns=['arn:aws:iam::aws:policy/AdministratorAccess']
+    ))
+
+    codepipelinerole = t.add_resource(Role(
+        "CodePipelineRole",
+        AssumeRolePolicyDocument=PolicyDocument(
+            Statement=[
+                Statement(
+                    Effect=Allow,
+                    Action=[AssumeRole],
+                    Principal=Principal("Service", ["codepipeline.amazonaws.com"])
+                )
+            ]
+        ),
+        ManagedPolicyArns=['arn:aws:iam::aws:policy/AdministratorAccess']
+    ))
+
+    linux_environment = Environment(
+        ComputeType='BUILD_GENERAL1_LARGE',
         Image='aws/codebuild/standard:3.0',
         Type='LINUX_CONTAINER',
     )
 
-    codebuild_role = template.add_resource(
+    codebuild_role = t.add_resource(
         Role(
             "CodeBuildRole",
             AssumeRolePolicyDocument=Policy(
@@ -55,176 +113,44 @@ def create_codebuild_project(template) -> cb.Project:
         )
     )
 
+    t.add_resource(SourceCredential(
+        AuthType='PERSONAL_ACCESS_TOKEN',
+        ServerType='GITHUB',
+        Token=Join('', ['{{resolve:secretsmanager:', Ref(gh_token_secret), ':SecretString}}'])
+    ))
+
     # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-codebuild-project-source.html
-    return Project(
-        "ContinuousCodeBuild",
-        Name = "ContinuousCodeBuild",
-        Description = 'Continous pipeline',
-        Artifacts = Artifacts(Type='CODEPIPELINE'),
-        Environment = environment,
-        Source = Source(Type='CODEPIPELINE'),
-        ServiceRole = Ref(codebuild_role)
-    )
-
-
-def create_pipeline_template(config) -> Template:
-    t = Template()
-
-    github_token = t.add_parameter(Parameter(
-        "GithubToken",
-        Type = "String"
-    ))
-
-    github_owner = t.add_parameter(Parameter(
-        "GitHubOwner",
-        Type = 'String',
-        Default = 'aiengines',
-        AllowedPattern = "[A-Za-z0-9-_]+"
-    ))
-
-    github_repo = t.add_parameter(Parameter(
-        "GitHubRepo",
-        Type = 'String',
-        Default = 'codebuild_pipeline_skeleton',
-        AllowedPattern = "[A-Za-z0-9-_]+"
-    ))
-
-    github_branch = t.add_parameter(Parameter(
-        "GitHubBranch",
-        Type = 'String',
-        Default = 'master',
-        AllowedPattern = "[A-Za-z0-9-_]+"
-    ))
-
-    artifact_store_s3_bucket = t.add_resource(Bucket(
-        "S3Bucket",
-    ))
-
-    cloudformationrole = t.add_resource(Role(
-        "CloudformationRole",
-        AssumeRolePolicyDocument = PolicyDocument(
-            Version = "2012-10-17",
-            Statement = [
-                Statement(
-                    Effect = Allow,
-                    Action = [AssumeRole],
-                    Principal = Principal("Service", ["cloudformation.amazonaws.com"])
-                )
+    wf = WebhookFilter
+    linux_cb_project = t.add_resource(Project(
+        "ContinuousCodeBuildLinux",
+        Name="ContinuousCodeBuildLinux",
+        Description='Continous pipeline',
+        Artifacts=Artifacts(Type='NO_ARTIFACTS'),
+        Environment=linux_environment,
+        Source=Source(
+            Type='GITHUB',
+            Location='https://github.com/aiengines/codebuild_pipeline_skeleton.git',
+            BuildSpec="ci_cd/buildspec.yml"
+        ),
+        ServiceRole=Ref(codebuild_role),
+        Triggers=ProjectTriggers(
+            Webhook=True,
+            FilterGroups=[
+                [wf(Type="EVENT", Pattern="PULL_REQUEST_CREATED")],
+                [wf(Type="EVENT", Pattern="PULL_REQUEST_UPDATED")],
+                [wf(Type="EVENT", Pattern="PULL_REQUEST_REOPENED")],
             ]
-        ),
-        ManagedPolicyArns = ['arn:aws:iam::aws:policy/AdministratorAccess']
+        )
     ))
 
-    codepipelinerole = t.add_resource(Role(
-        "CodePipelineRole",
-        AssumeRolePolicyDocument = PolicyDocument(
-            Statement = [
-                Statement(
-                    Effect = Allow,
-                    Action = [AssumeRole],
-                    Principal = Principal("Service", ["codepipeline.amazonaws.com"])
-                )
-            ]
-        ),
-        ManagedPolicyArns = ['arn:aws:iam::aws:policy/AdministratorAccess']
-    ))
-
-
-    codebuild_project = t.add_resource(create_codebuild_project(t))
-
-    pipeline = t.add_resource(Pipeline(
-        "CDPipeline",
-        ArtifactStore = ArtifactStore(
-            Type = "S3",
-            Location = Ref(artifact_store_s3_bucket)
-        ),
-#        DisableInboundStageTransitions = [
-#            DisableInboundStageTransitions(
-#                StageName = "Release",
-#                Reason = "Disabling the transition until "
-#                       "integration tests are completed"
-#            )
-#        ],
-        RestartExecutionOnUpdate = True,
-        RoleArn = codepipelinerole.GetAtt('Arn'),
-        Stages = [
-            Stages(
-                Name = "Source",
-                Actions = [
-                    Actions(
-                        Name = "SourceAction",
-                        ActionTypeId = ActionTypeId(
-                            Category = "Source",
-                            Owner = "ThirdParty",
-                            Provider = "GitHub",
-                            Version = "1",
-                        ),
-                        OutputArtifacts = [
-                            OutputArtifacts(
-                                Name = "GitHubSourceCode"
-                            )
-                        ],
-                        Configuration = {
-                            'Owner': Ref(github_owner),
-                            'Repo': Ref(github_repo),
-                            'Branch': Ref(github_branch),
-                            'PollForSourceChanges': False,
-                            'OAuthToken': Ref(github_token)
-                        },
-                        RunOrder = "1"
-                    )
-                ]
-            ),
-            Stages(
-                Name = "Build",
-                Actions = [
-                    Actions(
-                        Name = "BuildAction",
-                        ActionTypeId = ActionTypeId(
-                            Category = "Build",
-                            Owner = "AWS",
-                            Provider = "CodeBuild",
-                            Version = "1"
-                        ),
-                        InputArtifacts = [
-                            InputArtifacts(
-                                Name = "GitHubSourceCode"
-                            )
-                        ],
-                        OutputArtifacts = [
-                            OutputArtifacts(
-                                Name = "BuildArtifacts"
-                            )
-                        ],
-                        Configuration = {
-                            'ProjectName': Ref(codebuild_project),
-                        },
-                        RunOrder = "1"
-                    )
-                ]
-            ),
-
-        ],
-    ))
-
-    t.add_resource(Webhook(
-        "GitHubWebHook",
-        Authentication = 'GITHUB_HMAC',
-        AuthenticationConfiguration = WebhookAuthConfiguration(
-            SecretToken = Ref(github_token)
-        ),
-        Filters = [
-            WebhookFilterRule(
-                JsonPath = '$.ref',
-                MatchEquals = 'refs/heads/{Branch}'
-            )
-        ],
-        TargetPipeline = Ref(pipeline),
-        TargetAction = 'Source',
-        TargetPipelineVersion = pipeline.GetAtt('Version')
-    ))
+    # t.add_output(Output(
+    #    "ArtifactBucket",
+    #    Description="Bucket for build artifacts",
+    #    Value=Ref(artifact_store_s3_bucket)
+    # ))
 
     return t
+
 
 def parameters_interactive(template: Template) -> List[dict]:
     """
@@ -247,7 +173,6 @@ def parameters_interactive(template: Template) -> List[dict]:
     return parameter_values
 
 
-
 def config_logging():
     import time
     logging.getLogger().setLevel(os.environ.get('LOGLEVEL', logging.INFO))
@@ -263,7 +188,7 @@ def script_name() -> str:
 
 def config_argparse() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Code pipeline",
-        epilog="""
+                                     epilog="""
 """)
     parser.add_argument('config', nargs='?', help='config file', default='config.yaml')
     return parser
@@ -288,13 +213,14 @@ def main():
 
     param_values_dict = parameters_interactive(template)
     tparams = dict(
-            TemplateBody = template.to_yaml(),
-            Parameters = param_values_dict,
-            Capabilities=['CAPABILITY_IAM'],
-            #OnFailure = 'DELETE',
+        TemplateBody=template.to_yaml(),
+        Parameters=param_values_dict,
+        Capabilities=['CAPABILITY_IAM'],
+        # OnFailure = 'DELETE',
     )
     instantiate_CF_template(template, config['stack_name'], **tparams)
     return 0
+
 
 if __name__ == '__main__':
     sys.exit(main())
