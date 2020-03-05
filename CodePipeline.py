@@ -21,42 +21,34 @@ from util import *
 def create_pipeline_template(config) -> Template:
     t = Template()
 
-    github_token = t.add_parameter(Parameter(
-        "GithubToken",
-        Type="String"
-    ))
-
-    github_owner = t.add_parameter(Parameter(
-        "GitHubOwner",
-        Type='String',
-        Default='aiengines',
-        AllowedPattern="[A-Za-z0-9-_]+"
-    ))
+    #github_token = t.add_parameter(Parameter(
+    #    "GithubToken",
+    #    Type="String"
+    #))
 
     github_repo = t.add_parameter(Parameter(
         "GitHubRepo",
         Type='String',
-        Default='codebuild_pipeline_skeleton',
-        AllowedPattern="[A-Za-z0-9-_]+"
+        Default='https://github.com/aiengines/codebuild_pipeline_skeleton.git',
     ))
 
-    github_branch = t.add_parameter(Parameter(
-        "GitHubBranch",
-        Type='String',
-        Default='master',
-        AllowedPattern="[A-Za-z0-9-_]+"
-    ))
+#    github_branch = t.add_parameter(Parameter(
+#        "GitHubBranch",
+#        Type='String',
+#        Default='master',
+#        AllowedPattern="[A-Za-z0-9-_]+"
+#    ))
 
     # artifact_store_s3_bucket = t.add_resource(Bucket(
     #    "S3Bucket",
     # ))
 
-    gh_token_secret = t.add_resource(Secret(
-        "GHToken",
-        Name="GHToken",
-        Description="GithubToken for codebuild projects",
-        SecretString=Ref(github_token)
-    ))
+#    gh_token_secret = t.add_resource(Secret(
+#        "GHToken",
+#        Name="GHToken",
+#        Description="GithubToken for codebuild projects",
+#        SecretString=Ref(github_token)
+#    ))
 
     cloudformationrole = t.add_resource(Role(
         "CloudformationRole",
@@ -113,23 +105,25 @@ def create_pipeline_template(config) -> Template:
         )
     )
 
-    t.add_resource(SourceCredential(
-        AuthType='PERSONAL_ACCESS_TOKEN',
-        ServerType='GITHUB',
-        Token=Join('', ['{{resolve:secretsmanager:', Ref(gh_token_secret), ':SecretString}}'])
-    ))
+    #t.add_resource(SourceCredential(
+    #    "GithubSourceCredential",
+    #    AuthType='PERSONAL_ACCESS_TOKEN',
+    #    ServerType='GITHUB',
+    #    Token=Join('', ['{{resolve:secretsmanager:', Ref(gh_token_secret), ':SecretString}}'])
+    #))
 
     # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-codebuild-project-source.html
     wf = WebhookFilter
     linux_cb_project = t.add_resource(Project(
         "ContinuousCodeBuildLinux",
         Name="ContinuousCodeBuildLinux",
+        BadgeEnabled=True,
         Description='Continous pipeline',
         Artifacts=Artifacts(Type='NO_ARTIFACTS'),
         Environment=linux_environment,
         Source=Source(
             Type='GITHUB',
-            Location='https://github.com/aiengines/codebuild_pipeline_skeleton.git',
+            Location=Ref(github_repo),
             BuildSpec="ci_cd/buildspec.yml"
         ),
         ServiceRole=Ref(codebuild_role),
@@ -139,6 +133,7 @@ def create_pipeline_template(config) -> Template:
                 [wf(Type="EVENT", Pattern="PULL_REQUEST_CREATED")],
                 [wf(Type="EVENT", Pattern="PULL_REQUEST_UPDATED")],
                 [wf(Type="EVENT", Pattern="PULL_REQUEST_REOPENED")],
+                [wf(Type="EVENT", Pattern="PUSH")],
             ]
         )
     ))
